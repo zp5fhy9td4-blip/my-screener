@@ -1,210 +1,96 @@
-import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 import yfinance as yf
 
-# ページ構成・基本設定
 st.set_page_config(
-    page_title="りん風 AI株候補ノート", page_icon="🍎", layout="wide"
+    page_title="全自動株スクリーナー", page_icon="🍎", layout="wide"
 )
-st.title("🍎 りん風 AI株候補ノート")
+st.title("🍎 リアルタイム銘柄スクリーナー")
 
-# ==========================================
-# 1. 地合い・相場環境サマリーの取得
-# ==========================================
-st.subheader("📊 相場環境・地合いサマリー")
+# 監視対象の低位・材料株リスト
+SCAN_LIST = [
+    "3323",
+    "8946",
+    "4591",
+    "5856",
+    "3936",
+    "2315",
+    "3782",
+    "2330",
+    "6731",
+    "1757",
+    "3814",
+]
 
 
-@st.cache_data(ttl=1800)
-def get_market_summary():
-    tickers = {
-        "S&P 500": "^GSPC",
-        "NASDAQ": "^IXIC",
-        "NYダウ": "^DJI",
-        "VIX": "^VIX",
-    }
-    summary = {}
-
-    for name, symbol in tickers.items():
+@st.cache_data(ttl=300)
+def auto_scan():
+    results = []
+    for code in SCAN_LIST:
+        ticker = f"{code}.T"
         try:
-            df = yf.Ticker(symbol).history(period="5d")
-            if len(df) >= 2:
-                latest = df["Close"].iloc[-1]
-                prev = df["Close"].iloc[-2]
-                pct = ((latest - prev) / prev) * 100
-                summary[name] = {"val": latest, "pct": pct}
-        except Exception:
-            pass
-    return summary
-
-
-market_data = get_market_summary()
-
-cols = st.columns(4)
-if "S&P 500" in market_data:
-    cols[0].metric(
-        "S&P 500",
-        f"{market_data['S&P 500']['val']:.2f}",
-        f"{market_data['S&P 500']['pct']:+.2f}%",
-    )
-if "NASDAQ" in market_data:
-    cols[1].metric(
-        "NASDAQ",
-        f"{market_data['NASDAQ']['val']:.2f}",
-        f"{market_data['NASDAQ']['pct']:+.2f}%",
-    )
-if "NYダウ" in market_data:
-    cols[2].metric(
-        "NYダウ",
-        f"{market_data['NYダウ']['val']:.2f}",
-        f"{market_data['NYダウ']['pct']:+.2f}%",
-    )
-if "VIX" in market_data:
-    cols[3].metric(
-        "VIX",
-        f"{market_data['VIX']['val']:.2f}",
-        f"{market_data['VIX']['pct']:+.2f}%",
-    )
-
-st.markdown("---")
-
-# ==========================================
-# 2. サイドバー（条件・対象銘柄設定）
-# ==========================================
-st.sidebar.header("🔍 スクリーニング設定")
-
-default_tickers = "3323, 8946, 4591, 5856, 3936"
-ticker_input = st.sidebar.text_area(
-    "監視銘柄コード（カンマ区切り）", default_tickers, height=100
-)
-
-vol_threshold = st.sidebar.slider(
-    "出来高急増倍率（5日平均比）", 1.0, 5.0, 2.0, 0.5
-)
-run_button = st.sidebar.button("スクリーニング実行", type="primary")
-
-# ==========================================
-# 3. 銘柄データ解析ロジック
-# ==========================================
-WATCH_STOCKS = [t.strip() for t in ticker_input.split(",") if t.strip()]
-
-
-def fetch_stock_data(tickers):
-    data = []
-    for code in tickers:
-        ticker = f"{code}.T" if not code.endswith(".T") else code
-        try:
-            s = yf.Ticker(ticker)
-            df = s.history(period="1mo")
+            df = yf.Ticker(ticker).history(period="1mo")
             if len(df) >= 20:
-                df["MA5"] = df["Close"].rolling(5).mean()
-                df["MA20"] = df["Close"].rolling(20).mean()
-
                 latest = df.iloc[-1]
                 prev = df.iloc[-2]
-                avg_vol_5d = df["Volume"].iloc[-6:-1].mean()
+                pct = ((latest["Close"] - prev["Close"]) / prev["Close"]) * 100
+
+                avg_vol = df["Volume"].iloc[-6:-1].mean()
                 vol_ratio = (
-                    latest["Volume"] / avg_vol_5d if avg_vol_5d > 0 else 0
+                    latest["Volume"] / avg_vol if avg_vol > 0 else 0.0
                 )
 
-                # RSI(14) の計算
+                # RSI(14) の安全な計算
                 delta = df["Close"].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rs = gain / loss
-                rsi = (100 - (100 / (1 + rs))).iloc[-1]
+                gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
 
-                data.append(
+                if loss == 0 or pd.isna(loss):
+                    rsi = 100.0 if gain > 0 else 50.0
+                else:
+                    rs = gain / loss
+                    rsi = 100.0 - (100.0 / (1.0 + rs))
+
+                # 移動平均
+                ma5 = df["Close"].rolling(5).mean().iloc[-1]
+                ma20 = df["Close"].rolling(20).mean().iloc[-1]
+
+                results.append(
                     {
                         "コード": code,
-                        "株価": f"{latest['Close']:.1f}円",
-                        "前日比%": (
-                            (latest["Close"] - prev["Close"]) / prev["Close"]
-                        )
-                        * 100,
-                        "出来高倍率": vol_ratio,
-                        "RSI(14)": rsi,
-                        "MA5": latest["MA5"],
-                        "MA20": latest["MA20"],
-                        "出来高": int(latest["Volume"]),
+                        "現在値": f"{round(latest['Close'], 1)}円",
+                        "前日比%": round(pct, 2),
+                        "出来高倍率": round(vol_ratio, 2),
+                        "RSI": round(rsi, 1),
+                        "5日線": round(ma5, 1),
+                        "20日線": round(ma20, 1),
                     }
                 )
         except Exception:
             pass
-    return pd.DataFrame(data)
+    return pd.DataFrame(results)
 
 
-# ==========================================
-# 4. メイン表示・タブ切り替え
-# ==========================================
-tab1, tab2, tab3 = st.tabs(
-    ["🚀 デイ候補（出来高急増）", "📉 押し目候補", "⚠️ ワラント・注記"]
-)
+with st.spinner("最新データを自動スキャン中..."):
+    df = auto_scan()
 
-if run_button or st.session_state.get("initialized", False):
-    st.session_state["initialized"] = True
-    df_stocks = fetch_stock_data(WATCH_STOCKS)
+if not df.empty:
+    tab1, tab2 = st.tabs(["🔥 出来高急増（デイ候補）", "📉 押し目候補"])
 
-    if not df_stocks.empty:
-        # タブ1: デイ候補（出来高急増かつプラス）
-        with tab1:
-            st.write(
-                f"### 🔥 出来高急増銘柄（{vol_threshold}倍以上 & 前日比プラス）"
-            )
-            cond1 = (df_stocks["出来高倍率"] >= vol_threshold) & (
-                df_stocks["前日比%"] > 0
-            )
-            res1 = df_stocks[cond1]
-            if not res1.empty:
-                st.dataframe(
-                    res1[
-                        [
-                            "コード",
-                            "株価",
-                            "前日比%",
-                            "出来高倍率",
-                            "出来高",
-                            "RSI(14)",
-                        ]
-                    ],
-                    use_container_width=True,
-                )
-            else:
-                st.info("該当する銘柄はありません。")
+    with tab1:
+        # 出来高1.5倍以上かつ前日比プラス
+        day_df = df[(df["出来高倍率"] >= 1.5) & (df["前日比%"] > 0)]
+        if not day_df.empty:
+            st.dataframe(day_df, use_container_width=True)
+        else:
+            st.info("条件に合う急増銘柄はありません。全監視リストを表示します:")
+            st.dataframe(df, use_container_width=True)
 
-        # タブ2: 押し目候補（上昇トレンド中でRSI低下）
-        with tab2:
-            st.write("### 📉 押し目買い候補（5日線 > 20日線 かつ RSI 50以下）")
-            cond2 = (df_stocks["MA5"] > df_stocks["MA20"]) & (
-                df_stocks["RSI(14)"] <= 50
-            )
-            res2 = df_stocks[cond2]
-            if not res2.empty:
-                st.dataframe(
-                    res2[
-                        [
-                            "コード",
-                            "株価",
-                            "前日比%",
-                            "出来高倍率",
-                            "RSI(14)",
-                        ]
-                    ],
-                    use_container_width=True,
-                )
-            else:
-                st.info("該当する銘柄はありません。")
+    with tab2:
+        # 5日線 > 20日線 かつ RSI 50以下
+        oshi_df = df[(df["5日線"] > df["20日線"]) & (df["RSI"] <= 50)]
+        if not oshi_df.empty:
+            st.dataframe(oshi_df, use_container_width=True)
+        else:
+            st.info("現在、押し目条件に該当する銘柄はありません。")
 
-        # タブ3: 個別注記
-        with tab3:
-            st.write("### ⚠️ 新株予約権・希薄化等に関する注意事項")
-            st.info(
-                "低位株や材料株でスクリーニングを行う際は、適時開示情報（新株予約権の発行・行使状況）も併せてご確認ください。"
-            )
-    else:
-        st.error("データの取得に失敗したか、銘柄が見つかりませんでした。")
-else:
-    st.info(
-        "左側のサイドバーから条件を確認し、「スクリーニング実行」を押してください。"
-    )
